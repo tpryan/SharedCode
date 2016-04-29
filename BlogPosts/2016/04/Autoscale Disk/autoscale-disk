@@ -1,0 +1,121 @@
+#!/bin/bash
+# 	Copyright 2015, Google, Inc.
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+# Usage info
+show_help() {
+cat << EOF
+Usage: ${0##*/} -d CLOUDDISK [-t THRESHOLD] [-f FACTOR] [-m MAX]
+Checks the disk utilization of CLOUDDISK and if it is over the THRESHOLD
+increase the disk size by multiplying current size by FACTOR as long as it
+does not exceed MAX.
+    -c              Check to make sure you have properly authorized service 
+                    account. 
+                    SUCCESS = display from gcloud compute disks list
+                    FAILURE = ERROR - Insufficient Permission
+    -h              Display this help and exit
+    -d CLOUDDISK    The Google Cloud Disk name to check. This name can be seen
+                    running 'gcloud compute disks list'
+    -t THRESHOLD    The percentage (0-100) above which to resize the disk. 
+                    DEFAULT 90
+    -f FACTOR       The multiplier to resize the disk by. A 1GB disk with
+                    a factor of 2 will be resized to 2GB. 
+                    DEFAULT 2.
+    -m MAX          The limit in GB beyond which we will not resize a disk. 
+                    DEFAULT 6400GB.
+Examples:
+Run with defaults on a disk named 'storage' - 
+    ${0##*/} -d storage
+
+Check if the disk 'storage' is more than 50% usage, if so quadruple the disk 
+to a limit of 1000GB 
+    ${0##*/} -d storage - t 50 -f 4 -m 1000
+    
+EOF
+}
+
+check_perms() {
+    /usr/local/bin/gcloud compute disks list
+
+}
+
+# Initialize our own variables:
+THRESHOLD=90
+FACTOR=2
+MAX=64000
+while getopts "d:t:m:f:hc" opt; do
+    case "$opt" in
+        h)
+            show_help >&2
+            exit
+            ;;
+        c)
+            check_perms >&2
+            exit
+            ;;    
+        d)  
+            CLOUDDISK=$OPTARG
+            ;;
+        t)  
+            THRESHOLD=$OPTARG
+            ;;
+        m)  
+            MAX=$OPTARG
+            ;;        
+        f)  
+            FACTOR=$OPTARG
+            ;;
+    esac
+done
+if [ "$CLOUDDISK" = "" ]
+then
+    echo "You must set a CLOUDDISK using -d option. Run ${0##*/} -h for more help. "
+    exit
+fi
+
+# Get variables for scale parameters
+LOCALDISK=`readlink -f /dev/disk/by-id/google-$CLOUDDISK`
+
+# Get current usage in percentage expressed as a number between 1-100
+tmp=`df $LOCALDISK | awk '{ print $5 }' | tail -n 1`
+USAGE="${tmp//%}"
+
+# Check to see if disk is over threshold. 
+if [ $USAGE -lt $THRESHOLD ]
+then
+        echo "Disk is within threshold"
+        exit
+else
+        echo "Disk is over threshold, attempting to resize"
+fi
+
+# Get Current size of disk
+tmp2=`df -BG $LOCALDISK | awk '{ print $2 }' | tail -n 1`
+CURRENTSIZE="${tmp2//G}"
+
+# Compute next size of disk. 
+PROPOSEDSIZE=$(( CURRENTSIZE * FACTOR ))
+if [ $PROPOSEDSIZE -gt $MAX ]
+then
+        echo "Proposed disk size ($PROPOSEDSIZE)GB is higher than the max allowed ($MAX)GB."
+        exit
+else
+        echo "Proposed disk size acceptable, attempting to resize"
+fi
+
+# RESIZE IT
+ZONE=`/usr/local/bin/gcloud compute disks list $CLOUDDISK | awk '{ print $2 }' | tail -n 1`
+/usr/local/bin/gcloud compute disks resize $CLOUDDISK --size "$PROPOSEDSIZE"GB --zone $ZONE --quiet
+
+# Tell the OS that the disk has been resized.
+sudo resize2fs /dev/disk/by-id/google-"$CLOUDDISK"
